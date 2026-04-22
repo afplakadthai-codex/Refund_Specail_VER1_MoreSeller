@@ -378,12 +378,41 @@ function bvsr_ownership_exists_condition(): string
  return 'EXISTS (
         SELECT 1
         FROM order_refund_items ri0
-        JOIN order_items oi0 ON oi0.id = ri0.order_item_id
-        JOIN listings l0 ON l0.id = oi0.listing_id
+        INNER JOIN order_items oi0 ON oi0.id = ri0.order_item_id
+        INNER JOIN listings l0 ON l0.id = oi0.listing_id
         WHERE ri0.refund_id = r.id
-          AND l0.seller_id = :seller_id_1
+          AND l0.seller_id = :seller_id
     )';
 }
+}
+
+if (!function_exists('bvsr_refund_item_amount_expr')) {
+    function bvsr_refund_item_amount_expr(string $alias, string $type): string
+    {
+        $candidates = $type === 'approved'
+            ? ['approved_refund_amount', 'approved_amount', 'refund_approved_amount']
+            : ['requested_refund_amount', 'requested_amount', 'refund_requested_amount', 'refund_amount'];
+
+        $available = [];
+        foreach ($candidates as $column) {
+            if (function_exists('bv_order_refund_column_exists') && bv_order_refund_column_exists('order_refund_items', $column)) {
+                $available[] = $alias . '.' . $column;
+            }
+        }
+
+        if ($available === []) {
+            return '0';
+        }
+
+        return 'COALESCE(' . implode(', ', $available) . ', 0)';
+    }
+}
+
+if (!function_exists('bvsr_refund_has_seller_items')) {
+    function bvsr_refund_has_seller_items(array $row): bool
+    {
+        return (int)($row['seller_item_count'] ?? 0) > 0;
+    }
 }
 
 if (!function_exists('bvsr_apply_filter_sql')) {
@@ -431,7 +460,7 @@ if (!function_exists('bvsr_fetch_summary_counts')) {
         }
 
         $params = [
-    'seller_id_1' => $sellerId,
+    'seller_id' => $sellerId,
  
 ];
         $filterSql = bvsr_apply_filter_sql($filters, $params);
@@ -461,10 +490,13 @@ if (!function_exists('bvsr_fetch_refunds')) {
         }
 
 $params = [
-    'seller_id_1' => $sellerId,
+    'seller_id' => $sellerId,
 
 ];
         $filterSql = bvsr_apply_filter_sql($filters, $params);
+
+$requestedExpr = bvsr_refund_item_amount_expr('ri', 'requested');
+        $approvedExpr = bvsr_refund_item_amount_expr('ri', 'approved');
 
 $sql = 'SELECT
             r.id,
@@ -472,8 +504,8 @@ $sql = 'SELECT
             r.order_id,
             r.status,
             r.currency,
-            r.requested_refund_amount,
-            r.approved_refund_amount,
+            COALESCE(SUM(' . $requestedExpr . '), 0) AS seller_requested_refund_amount,
+            COALESCE(SUM(' . $approvedExpr . '), 0) AS seller_approved_refund_amount,
             r.actual_refunded_amount,
             r.requested_at,
             r.created_at,
@@ -481,14 +513,16 @@ $sql = 'SELECT
             r.refund_reason_code,
             r.refund_reason_text,
             o.order_code AS order_code,
+            COUNT(DISTINCT ri.id) AS seller_item_count,
             GROUP_CONCAT(DISTINCT COALESCE(oi.title_snapshot, l.title) ORDER BY oi.id ASC SEPARATOR \' || \') AS listing_titles
         FROM order_refunds r
    LEFT JOIN orders o ON o.id = r.order_id
-   LEFT JOIN order_refund_items ri ON ri.refund_id = r.id
-   LEFT JOIN order_items oi ON oi.id = ri.order_item_id
-   LEFT JOIN listings l ON l.id = oi.listing_id
+  INNER JOIN order_refund_items ri ON ri.refund_id = r.id
+  INNER JOIN order_items oi ON oi.id = ri.order_item_id
+  INNER JOIN listings l ON l.id = oi.listing_id AND l.seller_id = :seller_id
        WHERE ' . bvsr_ownership_exists_condition() . $filterSql . '
     GROUP BY r.id
+    HAVING COUNT(DISTINCT ri.id) > 0
     ORDER BY
         FIELD(r.status,
             \'pending_approval\',
@@ -793,8 +827,8 @@ $dashboardUrl = '/seller/dashboard.php';
                         $orderId = (int)bvsr_pick($row, ['order_id'], 0);
                         $orderCode = (string)bvsr_pick($row, ['order_code'], 'ORDER #' . $orderId);
                         $currency = (string)bvsr_pick($row, ['currency'], '');
-                        $requestedAmount = bvsr_pick($row, ['requested_refund_amount'], 0);
-                        $approvedAmount = bvsr_pick($row, ['approved_refund_amount'], 0);
+                        $requestedAmount = bvsr_pick($row, ['seller_requested_refund_amount'], 0);
+                        $approvedAmount = bvsr_pick($row, ['seller_approved_refund_amount'], 0);
                         $status = strtolower(trim((string)bvsr_pick($row, ['status'], 'unknown')));
                         $badge = bvsr_refund_status_badge($status);
                         $requestedAt = bvsr_format_time(bvsr_pick($row, ['requested_at', 'created_at'], '-'));
@@ -808,6 +842,7 @@ if (trim($reasonText) === '') {
 }
                         $listingSummary = bvsr_listing_summary_for_rows($row);
                         $viewUrl = bvsr_build_url('/seller/refund_view.php', ['id' => $refundId]);
+                        $canTakeAction = bvsr_refund_has_seller_items($row);
                         ?>
                         <tr>
                             <td>
@@ -834,7 +869,7 @@ if (trim($reasonText) === '') {
                             <td>
                                 <div class="stack">
                                     <a class="btn small ghost" href="<?php echo bvsr_h($viewUrl); ?>">View</a>
-                                    <?php if ($status === 'pending_approval'): ?>
+                                    <?php if ($status === 'pending_approval' && $canTakeAction): ?>
                                         <form method="post" action="/seller/refund_action.php" class="quick-form">
                                             <input type="hidden" name="refund_id" value="<?php echo bvsr_h($refundId); ?>">
                                             <input type="hidden" name="return_url" value="<?php echo bvsr_h($currentUrl); ?>">
