@@ -402,6 +402,70 @@ if (!function_exists('bvsr_refund_has_seller_items')) {
     }
 }
 
+
+if (!function_exists('bvsr_fetch_seller_decision_data')) {
+    function bvsr_fetch_seller_decision_data(int $refundId, int $sellerId, float $fallbackRequested = 0.0, float $fallbackApproved = 0.0): array
+    {
+        $default = [
+            'seller_decision_status' => 'pending_approval',
+            'seller_decision_requested_amount' => (float)$fallbackRequested,
+            'seller_decision_approved_amount' => (float)$fallbackApproved,
+        ];
+
+        if ($refundId <= 0 || $sellerId <= 0) {
+            return $default;
+        }
+
+        if (function_exists('bv_order_refund_get_seller_decision')) {
+            try {
+                $decision = bv_order_refund_get_seller_decision($refundId, $sellerId);
+                if (is_array($decision) && $decision !== []) {
+                    $status = strtolower(trim((string)($decision['status'] ?? 'pending_approval')));
+                    if ($status === '') {
+                        $status = 'pending_approval';
+                    }
+                    return [
+                        'seller_decision_status' => $status,
+                        'seller_decision_requested_amount' => (float)($decision['requested_amount'] ?? $fallbackRequested),
+                        'seller_decision_approved_amount' => (float)($decision['approved_amount'] ?? $fallbackApproved),
+                    ];
+                }
+            } catch (Throwable $decisionError) {
+            }
+        }
+
+        if (function_exists('bv_order_refund_table_exists') && bv_order_refund_table_exists('order_refund_seller_decisions')) {
+            try {
+                $row = bvsr_query_one(
+                    'SELECT status, requested_amount, approved_amount
+                     FROM order_refund_seller_decisions
+                     WHERE refund_id = :refund_id AND seller_id = :seller_id
+                     ORDER BY id DESC
+                     LIMIT 1',
+                    [
+                        'refund_id' => $refundId,
+                        'seller_id' => $sellerId,
+                    ]
+                );
+                if (is_array($row) && $row !== []) {
+                    $status = strtolower(trim((string)($row['status'] ?? 'pending_approval')));
+                    if ($status === '') {
+                        $status = 'pending_approval';
+                    }
+                    return [
+                        'seller_decision_status' => $status,
+                        'seller_decision_requested_amount' => (float)($row['requested_amount'] ?? $fallbackRequested),
+                        'seller_decision_approved_amount' => (float)($row['approved_amount'] ?? $fallbackApproved),
+                    ];
+                }
+            } catch (Throwable $decisionRowError) {
+            }
+        }
+
+        return $default;
+    }
+}
+
 if (!function_exists('bvsr_apply_filter_sql')) {
     function bvsr_apply_filter_sql(array $filters, array &$params): string
     {
@@ -556,10 +620,21 @@ if (!function_exists('bvsr_fetch_refunds')) {
                 continue;
             }
 
-           $refund['seller_item_count'] = (int)($aggregate['seller_item_count'] ?? 0);
+            $refund['seller_item_count'] = (int)($aggregate['seller_item_count'] ?? 0);
             $refund['seller_requested_refund_amount'] = (float)($aggregate['seller_requested_refund_amount'] ?? 0);
             $refund['seller_approved_refund_amount'] = (float)($aggregate['seller_approved_refund_amount'] ?? 0);
             $refund['listing_titles'] = (string)($aggregate['listing_titles'] ?? '');
+
+            $sellerDecision = bvsr_fetch_seller_decision_data(
+                $rid,
+                $sellerId,
+                (float)$refund['seller_requested_refund_amount'],
+                (float)$refund['seller_approved_refund_amount']
+            );
+            $refund['seller_decision_status'] = (string)($sellerDecision['seller_decision_status'] ?? 'pending_approval');
+            $refund['seller_decision_requested_amount'] = (float)($sellerDecision['seller_decision_requested_amount'] ?? $refund['seller_requested_refund_amount']);
+            $refund['seller_decision_approved_amount'] = (float)($sellerDecision['seller_decision_approved_amount'] ?? $refund['seller_approved_refund_amount']);
+
             $rows[] = $refund;
         }
 
@@ -855,8 +930,11 @@ $dashboardUrl = '/seller/dashboard.php';
                         $currency = (string)bvsr_pick($row, ['currency'], '');
                         $requestedAmount = bvsr_pick($row, ['seller_decision_requested_amount', 'seller_requested_refund_amount'], 0);
                         $approvedAmount = bvsr_pick($row, ['seller_decision_approved_amount', 'seller_approved_refund_amount'], 0);
-                        $status = strtolower(trim((string)bvsr_pick($row, ['seller_decision_status', 'status'], 'unknown')));
-                        $badge = bvsr_refund_status_badge($status);
+                        $sellerDecisionStatus = strtolower(trim((string)bvsr_pick($row, ['seller_decision_status'], 'pending_approval')));
+                        if ($sellerDecisionStatus === '') {
+                            $sellerDecisionStatus = 'pending_approval';
+                        }
+                        $badge = bvsr_refund_status_badge($sellerDecisionStatus);
                         $requestedAt = bvsr_format_time(bvsr_pick($row, ['requested_at', 'created_at'], '-'));
                         $updatedAt = bvsr_format_time(bvsr_pick($row, ['updated_at'], '-'));
 $buyerName = '-';
@@ -868,7 +946,7 @@ if (trim($reasonText) === '') {
 }
                         $listingSummary = bvsr_listing_summary_for_rows($row);
                         $viewUrl = bvsr_build_url('/seller/refund_view.php', ['id' => $refundId]);
-                         $canTakeAction = bvsr_refund_has_seller_items($row) && $status === 'pending_approval';
+                         $canTakeAction = bvsr_refund_has_seller_items($row) && $sellerDecisionStatus === 'pending_approval';
                         ?>
                         <tr>
                             <td>
@@ -899,9 +977,7 @@ if (trim($reasonText) === '') {
                                         <form method="post" action="/seller/refund_action.php" class="quick-form">
                                             <input type="hidden" name="refund_id" value="<?php echo bvsr_h($refundId); ?>">
                                             <input type="hidden" name="return_url" value="<?php echo bvsr_h($currentUrl); ?>">
-                                            <?php if ($csrfToken !== ''): ?>
-                                                <input type="hidden" name="csrf_token" value="<?php echo bvsr_h($csrfToken); ?>">
-                                            <?php endif; ?>
+                                            <input type="hidden" name="csrf_token" value="<?php echo bvsr_h($csrfToken); ?>">
                                             <input type="number" name="approved_refund_amount" min="0" step="0.01" value="<?php echo bvsr_h(number_format((float)(is_numeric($requestedAmount) ? $requestedAmount : 0), 2, '.', '')); ?>" title="Approved amount">
                                             <button class="btn small approve" type="submit" name="action" value="approve">Approve</button>
                                             <button class="btn small reject" type="submit" name="action" value="reject">Reject</button>
