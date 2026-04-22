@@ -239,30 +239,17 @@ if (!function_exists('bvsr_money')) {
 if (!function_exists('bvsr_csrf_token')) {
     function bvsr_csrf_token(): string
     {
-        $paths = [
-            ['_csrf_seller_refunds', 'refund_actions'],
-            ['_csrf_seller_refunds', 'seller_refund_actions'],
-            ['_csrf', 'refund_action'],
-            ['csrf', 'token'],
-        ];
-
-        foreach ($paths as $path) {
-            [$root, $leaf] = $path;
-            if (isset($_SESSION[$root]) && is_array($_SESSION[$root]) && isset($_SESSION[$root][$leaf]) && is_string($_SESSION[$root][$leaf])) {
-                $token = trim($_SESSION[$root][$leaf]);
-                if ($token !== '') {
-                    return $token;
-                }
-            }
+        if (!isset($_SESSION['_csrf_seller_refunds']) || !is_array($_SESSION['_csrf_seller_refunds'])) {
+            $_SESSION['_csrf_seller_refunds'] = [];
         }
 
-        foreach (['csrf_token', '_csrf_token', 'seller_csrf_token', 'refund_csrf_token'] as $k) {
-            if (isset($_SESSION[$k]) && is_string($_SESSION[$k]) && trim($_SESSION[$k]) !== '') {
-                return trim($_SESSION[$k]);
-            }
+        $token = $_SESSION['_csrf_seller_refunds']['refund_actions'] ?? '';
+        if (!is_string($token) || trim($token) === '') {
+            $token = bin2hex(random_bytes(16));
+            $_SESSION['_csrf_seller_refunds']['refund_actions'] = $token;
         }
 
-        return '';
+        return $token;
     }
 }
 
@@ -552,8 +539,16 @@ if (!function_exists('bvsr_fetch_refunds')) {
 
         $rows = [];
         foreach ($refunds as $refund) {
+            $rid = (int)($refund['id'] ?? 0);
+            if ($rid > 0 && function_exists('bv_order_refund_sync_seller_decisions')) {
+                try {
+                    bv_order_refund_sync_seller_decisions($rid);
+                } catch (Throwable $syncError) {
+                }
+            }
+
             $aggregate = bvsr_query_one($aggregateSql, [
-                'refund_id' => (int)($refund['id'] ?? 0),
+                'refund_id' => $rid,
                 'seller_id' => $sellerId,
             ]) ?? [];
 
@@ -561,7 +556,7 @@ if (!function_exists('bvsr_fetch_refunds')) {
                 continue;
             }
 
-            $refund['seller_item_count'] = (int)($aggregate['seller_item_count'] ?? 0);
+           $refund['seller_item_count'] = (int)($aggregate['seller_item_count'] ?? 0);
             $refund['seller_requested_refund_amount'] = (float)($aggregate['seller_requested_refund_amount'] ?? 0);
             $refund['seller_approved_refund_amount'] = (float)($aggregate['seller_approved_refund_amount'] ?? 0);
             $refund['listing_titles'] = (string)($aggregate['listing_titles'] ?? '');
@@ -858,9 +853,9 @@ $dashboardUrl = '/seller/dashboard.php';
                         $orderId = (int)bvsr_pick($row, ['order_id'], 0);
                         $orderCode = (string)bvsr_pick($row, ['order_code'], 'ORDER #' . $orderId);
                         $currency = (string)bvsr_pick($row, ['currency'], '');
-                        $requestedAmount = bvsr_pick($row, ['seller_requested_refund_amount'], 0);
-                        $approvedAmount = bvsr_pick($row, ['seller_approved_refund_amount'], 0);
-                        $status = strtolower(trim((string)bvsr_pick($row, ['status'], 'unknown')));
+                        $requestedAmount = bvsr_pick($row, ['seller_decision_requested_amount', 'seller_requested_refund_amount'], 0);
+                        $approvedAmount = bvsr_pick($row, ['seller_decision_approved_amount', 'seller_approved_refund_amount'], 0);
+                        $status = strtolower(trim((string)bvsr_pick($row, ['seller_decision_status', 'status'], 'unknown')));
                         $badge = bvsr_refund_status_badge($status);
                         $requestedAt = bvsr_format_time(bvsr_pick($row, ['requested_at', 'created_at'], '-'));
                         $updatedAt = bvsr_format_time(bvsr_pick($row, ['updated_at'], '-'));
@@ -873,7 +868,7 @@ if (trim($reasonText) === '') {
 }
                         $listingSummary = bvsr_listing_summary_for_rows($row);
                         $viewUrl = bvsr_build_url('/seller/refund_view.php', ['id' => $refundId]);
-                        $canTakeAction = bvsr_refund_has_seller_items($row);
+                         $canTakeAction = bvsr_refund_has_seller_items($row) && $status === 'pending_approval';
                         ?>
                         <tr>
                             <td>
@@ -900,7 +895,7 @@ if (trim($reasonText) === '') {
                             <td>
                                 <div class="stack">
                                     <a class="btn small ghost" href="<?php echo bvsr_h($viewUrl); ?>">View</a>
-                                    <?php if ($status === 'pending_approval' && $canTakeAction): ?>
+                                     <?php if ($canTakeAction): ?>
                                         <form method="post" action="/seller/refund_action.php" class="quick-form">
                                             <input type="hidden" name="refund_id" value="<?php echo bvsr_h($refundId); ?>">
                                             <input type="hidden" name="return_url" value="<?php echo bvsr_h($currentUrl); ?>">
