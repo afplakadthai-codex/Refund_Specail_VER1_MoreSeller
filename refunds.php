@@ -498,6 +498,13 @@ $params = [
 $requestedExpr = bvsr_refund_item_amount_expr('ri', 'requested');
         $approvedExpr = bvsr_refund_item_amount_expr('ri', 'approved');
 
+        $titleExpr = 'l.title';
+        if (function_exists('bv_order_refund_column_exists') && bv_order_refund_column_exists('order_items', 'title_snapshot')) {
+            $titleExpr = 'COALESCE(oi.title_snapshot, l.title)';
+        } elseif (function_exists('bv_order_refund_column_exists') && bv_order_refund_column_exists('order_items', 'item_title')) {
+            $titleExpr = 'COALESCE(oi.item_title, l.title)';
+        }
+
 $sql = 'SELECT
             r.id,
             r.refund_code,
@@ -514,7 +521,7 @@ $sql = 'SELECT
             r.refund_reason_text,
             o.order_code AS order_code,
             COUNT(DISTINCT ri.id) AS seller_item_count,
-            GROUP_CONCAT(DISTINCT COALESCE(oi.title_snapshot, l.title) ORDER BY oi.id ASC SEPARATOR \' || \') AS listing_titles
+           GROUP_CONCAT(DISTINCT ' . $titleExpr . ' ORDER BY oi.id ASC SEPARATOR \' || \') AS listing_titles 
         FROM order_refunds r
    LEFT JOIN orders o ON o.id = r.order_id
   INNER JOIN order_refund_items ri ON ri.refund_id = r.id
