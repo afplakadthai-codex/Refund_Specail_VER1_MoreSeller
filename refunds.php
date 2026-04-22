@@ -481,7 +481,6 @@ if (!function_exists('bvsr_fetch_summary_counts')) {
         return $counts;
     }
 }
-
 if (!function_exists('bvsr_fetch_refunds')) {
     function bvsr_fetch_refunds(int $sellerId, array $filters = []): array
     {
@@ -489,13 +488,12 @@ if (!function_exists('bvsr_fetch_refunds')) {
             return [];
         }
 
-$params = [
-    'seller_id' => $sellerId,
-
-];
+        $params = [
+            'seller_id' => $sellerId,
+        ];
         $filterSql = bvsr_apply_filter_sql($filters, $params);
 
-$requestedExpr = bvsr_refund_item_amount_expr('ri', 'requested');
+        $requestedExpr = bvsr_refund_item_amount_expr('ri', 'requested');
         $approvedExpr = bvsr_refund_item_amount_expr('ri', 'approved');
 
         $titleExpr = 'l.title';
@@ -505,47 +503,72 @@ $requestedExpr = bvsr_refund_item_amount_expr('ri', 'requested');
             $titleExpr = 'COALESCE(oi.item_title, l.title)';
         }
 
-$sql = 'SELECT
+        $headerSql = 'SELECT
             r.id,
             r.refund_code,
             r.order_id,
             r.status,
             r.currency,
-            COALESCE(SUM(' . $requestedExpr . '), 0) AS seller_requested_refund_amount,
-            COALESCE(SUM(' . $approvedExpr . '), 0) AS seller_approved_refund_amount,
             r.actual_refunded_amount,
             r.requested_at,
             r.created_at,
             r.updated_at,
             r.refund_reason_code,
             r.refund_reason_text,
-            o.order_code AS order_code,
-            COUNT(DISTINCT ri.id) AS seller_item_count,
-           GROUP_CONCAT(DISTINCT ' . $titleExpr . ' ORDER BY oi.id ASC SEPARATOR \' || \') AS listing_titles 
+            o.order_code AS order_code
         FROM order_refunds r
-   LEFT JOIN orders o ON o.id = r.order_id
-  INNER JOIN order_refund_items ri ON ri.refund_id = r.id
-  INNER JOIN order_items oi ON oi.id = ri.order_item_id
-  INNER JOIN listings l ON l.id = oi.listing_id AND l.seller_id = :seller_id
-       WHERE ' . bvsr_ownership_exists_condition() . $filterSql . '
-    GROUP BY r.id
-    HAVING COUNT(DISTINCT ri.id) > 0
-    ORDER BY
-        FIELD(r.status,
-            \'pending_approval\',
-            \'approved\',
-            \'processing\',
-            \'partially_refunded\',
-            \'refunded\',
-            \'rejected\',
-            \'failed\',
-            \'cancelled\'
-        ),
-        COALESCE(r.requested_at, r.created_at) DESC,
-        r.id DESC
-    LIMIT 500';
+        LEFT JOIN orders o ON o.id = r.order_id
+        WHERE ' . bvsr_ownership_exists_condition() . $filterSql . '
+        ORDER BY
+            FIELD(r.status,
+                \'pending_approval\',
+                \'approved\',
+                \'processing\',
+                \'partially_refunded\',
+                \'refunded\',
+                \'rejected\',
+                \'failed\',
+                \'cancelled\'
+            ),
+            COALESCE(r.requested_at, r.created_at) DESC,
+            r.id DESC
+        LIMIT 500';
 
-        return bvsr_query_all($sql, $params);
+        $refunds = bvsr_query_all($headerSql, $params);
+        if ($refunds === []) {
+            return [];
+        }
+
+        $aggregateSql = 'SELECT
+                COUNT(DISTINCT ri.id) AS seller_item_count,
+                COALESCE(SUM(' . $requestedExpr . '), 0) AS seller_requested_refund_amount,
+                COALESCE(SUM(' . $approvedExpr . '), 0) AS seller_approved_refund_amount,
+                GROUP_CONCAT(DISTINCT ' . $titleExpr . ' SEPARATOR \' || \') AS listing_titles
+            FROM order_refund_items ri
+            INNER JOIN order_items oi ON oi.id = ri.order_item_id
+            INNER JOIN listings l ON l.id = oi.listing_id
+            WHERE ri.refund_id = :refund_id
+              AND l.seller_id = :seller_id';
+
+        $rows = [];
+        foreach ($refunds as $refund) {
+            $aggregate = bvsr_query_one($aggregateSql, [
+                'refund_id' => (int)($refund['id'] ?? 0),
+                'seller_id' => $sellerId,
+            ]) ?? [];
+
+            if ((int)($aggregate['seller_item_count'] ?? 0) <= 0) {
+                continue;
+            }
+
+            $refund['seller_item_count'] = (int)($aggregate['seller_item_count'] ?? 0);
+            $refund['seller_requested_refund_amount'] = (float)($aggregate['seller_requested_refund_amount'] ?? 0);
+            $refund['seller_approved_refund_amount'] = (float)($aggregate['seller_approved_refund_amount'] ?? 0);
+            $refund['listing_titles'] = (string)($aggregate['listing_titles'] ?? '');
+            $rows[] = $refund;
+        }
+
+        return $rows;
     }
 }
 
@@ -646,6 +669,7 @@ try {
     $summaryCounts = bvsr_fetch_summary_counts($userId, $filters);
     $rows = bvsr_fetch_refunds($userId, $filters);
 } catch (Throwable $e) {
+    error_log('SELLER_REFUNDS_QUEUE_ERROR: ' . $e->getMessage());
     $errorMessage = 'Unable to load refund queue at the moment.';
 }
 
